@@ -121,6 +121,12 @@ import {
   importFromLocalStorage,
   importUsernameFromLocalStorage,
 } from "./data/localStorage";
+import {
+  ACTIVE_FILE_AUTOSAVE_TIMEOUT,
+  autosaveToActiveFile,
+  loadFromActiveFile,
+  persistActiveFileHandle,
+} from "./data/ActiveFile";
 
 import { loadFilesFromFirebase } from "./data/firebase";
 import {
@@ -231,12 +237,8 @@ const initializeScene = async (opts: {
 
   const localDataState = importFromLocalStorage();
 
-  let scene: Omit<
-    RestoredDataState,
-    // we're not storing files in the scene database/localStorage, and instead
-    // fetch them async from a different store
-    "files"
-  > & {
+  let scene: Omit<RestoredDataState, "files"> & {
+    files?: BinaryFiles;
     scrollToContent?: boolean;
   } = {
     elements: restoreElements(localDataState?.elements, null, {
@@ -248,6 +250,27 @@ const initializeScene = async (opts: {
 
   let roomLinkData = getCollaborationLinkData(window.location.href);
   const isExternalScene = !!(id || jsonBackendMatch || roomLinkData);
+  if (!isExternalScene && !externalUrlMatch) {
+    const activeFileData = await loadFromActiveFile({
+      localAppState: opts.excalidrawAPI.getAppState(),
+      localElements: localDataState?.elements || null,
+    });
+
+    if (activeFileData) {
+      scene = {
+        ...activeFileData,
+        elements: restoreElements(activeFileData.elements, null, {
+          repairBindings: true,
+          deleteInvisibleElements: true,
+        }),
+        appState: restoreAppState(
+          activeFileData.appState,
+          localDataState?.appState,
+        ),
+      };
+    }
+  }
+
   if (isExternalScene) {
     if (
       // don't prompt if scene is empty
@@ -395,6 +418,25 @@ const ExcalidrawWrapper = () => {
   }
 
   const debugCanvasRef = useRef<HTMLCanvasElement>(null);
+  const activeFileHandleRef = useRef<FileSystemFileHandle | null>(null);
+  const autosaveToDiskRef = useRef(
+    debounce(
+      (
+        elements: readonly OrderedExcalidrawElement[],
+        appState: AppState,
+        files: BinaryFiles,
+      ) => {
+        autosaveToActiveFile({
+          elements,
+          appState,
+          files,
+        }).catch((error) => {
+          console.warn("Autosave to active file failed:", error);
+        });
+      },
+      ACTIVE_FILE_AUTOSAVE_TIMEOUT,
+    ),
+  );
 
   useEffect(() => {
     trackEvent("load", "frame", getFrame());
@@ -495,9 +537,13 @@ const ExcalidrawWrapper = () => {
             ]);
           });
         } else if (isInitialLoad) {
-          if (fileIds.length) {
+          const missingFileIds = fileIds.filter(
+            (id) => !data.scene?.files?.[id],
+          );
+
+          if (missingFileIds.length) {
             LocalData.fileStorage
-              .getFiles(fileIds)
+              .getFiles(missingFileIds)
               .then(async ({ loadedFiles, erroredFiles }) => {
                 if (loadedFiles.length) {
                   excalidrawAPI.addFiles(loadedFiles);
@@ -653,6 +699,7 @@ const ExcalidrawWrapper = () => {
   useEffect(() => {
     const unloadHandler = (event: BeforeUnloadEvent) => {
       LocalData.flushSave();
+      autosaveToDiskRef.current.flush();
 
       if (
         excalidrawAPI &&
@@ -675,12 +722,28 @@ const ExcalidrawWrapper = () => {
     };
   }, [excalidrawAPI]);
 
+  useEffect(() => {
+    const autosaveToDisk = autosaveToDiskRef.current;
+
+    return () => {
+      autosaveToDisk.cancel();
+    };
+  }, []);
+
   const onChange = (
     elements: readonly OrderedExcalidrawElement[],
     appState: AppState,
     files: BinaryFiles,
   ) => {
+    if (activeFileHandleRef.current !== appState.fileHandle) {
+      activeFileHandleRef.current = appState.fileHandle;
+      persistActiveFileHandle(appState.fileHandle).catch((error) => {
+        console.warn("Failed to persist active file handle:", error);
+      });
+    }
+
     if (collabAPI?.isCollaborating()) {
+      autosaveToDiskRef.current.cancel();
       collabAPI.syncElements(elements);
     }
 
@@ -714,6 +777,12 @@ const ExcalidrawWrapper = () => {
           }
         }
       });
+    }
+
+    if (!collabAPI?.isCollaborating() && appState.fileHandle) {
+      autosaveToDiskRef.current(elements, appState, files);
+    } else {
+      autosaveToDiskRef.current.cancel();
     }
 
     // Render the debug scene if the debug canvas is available
