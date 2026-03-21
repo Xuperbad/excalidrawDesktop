@@ -12,7 +12,12 @@ import type { MaybePromise } from "@excalidraw/common/utility-types";
 import { cleanAppStateForExport, clearAppStateForDatabase } from "../appState";
 
 import { isImageFileHandle, loadFromBlob } from "./blob";
-import { fileOpen, fileSave } from "./filesystem";
+import {
+  ensureFileHandlePermission,
+  fileOpen,
+  fileSave,
+  nativeFileSystemSupported,
+} from "./filesystem";
 
 import type { AppState, BinaryFiles, LibraryItems } from "../types";
 import type {
@@ -102,6 +107,9 @@ export const saveAsJSON = async ({
 export const loadFromJSON = async (
   localAppState: AppState,
   localElements: readonly ExcalidrawElement[] | null,
+  opts?: {
+    requestWriteAccess?: boolean;
+  },
 ) => {
   const file = await fileOpen({
     description: "Excalidraw files",
@@ -109,7 +117,25 @@ export const loadFromJSON = async (
     // gets resolved. Else, iOS users cannot open `.excalidraw` files.
     // extensions: ["json", "excalidraw", "png", "svg"],
   });
-  return loadFromBlob(file, localAppState, localElements, file.handle);
+  const fileHandle = file.handle || null;
+  const hasFileHandle = !!fileHandle;
+  const nativeFileSystem = nativeFileSystemSupported;
+  const writePermissionGranted =
+    opts?.requestWriteAccess && fileHandle
+      ? await ensureFileHandlePermission(fileHandle, "readwrite")
+      : false;
+  const data = await loadFromBlob(file, localAppState, localElements, fileHandle);
+  return {
+    ...data,
+    fileAccess:
+      opts?.requestWriteAccess
+        ? {
+            nativeFileSystem,
+            hasFileHandle,
+            writePermissionGranted,
+          }
+        : undefined,
+  };
 };
 
 export const isValidExcalidrawData = (data?: {

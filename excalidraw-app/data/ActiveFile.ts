@@ -7,6 +7,10 @@ import {
 } from "@excalidraw/excalidraw/data/blob";
 import { saveAsJSON } from "@excalidraw/excalidraw/data/json";
 import { resaveAsImageWithScene } from "@excalidraw/excalidraw/data/resave";
+import {
+  ensureFileHandlePermission,
+  queryFileHandlePermission,
+} from "@excalidraw/excalidraw/data/filesystem";
 
 import type { ImportedDataState } from "@excalidraw/excalidraw/data/types";
 import type { ExcalidrawElement } from "@excalidraw/element/types";
@@ -17,30 +21,10 @@ const ACTIVE_FILE_KEY = "lastActiveFileHandle";
 
 export const ACTIVE_FILE_AUTOSAVE_TIMEOUT = 1500;
 
-type PermissionMode = "read" | "readwrite";
-
-const queryFilePermission = async (
-  fileHandle: FileSystemFileHandle,
-  mode: PermissionMode,
+export const ensureActiveFileWritable = async (
+  fileHandle: FileSystemFileHandle | null,
 ) => {
-  try {
-    const permissionQuery = (
-      fileHandle as FileSystemFileHandle & {
-        queryPermission?: (descriptor: {
-          mode: PermissionMode;
-        }) => Promise<PermissionState>;
-      }
-    ).queryPermission;
-
-    if (!permissionQuery) {
-      return false;
-    }
-
-    return (await permissionQuery.call(fileHandle, { mode })) === "granted";
-  } catch (error) {
-    console.warn("Failed to query file permission:", error);
-    return false;
-  }
+  return ensureFileHandlePermission(fileHandle, "readwrite");
 };
 
 export const persistActiveFileHandle = async (
@@ -87,7 +71,7 @@ export const loadFromActiveFile = async ({
     return null;
   }
 
-  if (!(await queryFilePermission(fileHandle, "read"))) {
+  if (!(await queryFileHandlePermission(fileHandle, "read"))) {
     return null;
   }
 
@@ -117,10 +101,6 @@ export const autosaveToActiveFile = async ({
   const { fileHandle } = appState;
 
   if (!nativeFileSystemSupported || !fileHandle) {
-    return false;
-  }
-
-  if (!(await queryFilePermission(fileHandle, "readwrite"))) {
     return false;
   }
 

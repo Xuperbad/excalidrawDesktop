@@ -21,7 +21,10 @@ import { Tooltip } from "../components/Tooltip";
 import { ExportIcon, questionCircle, saveAs } from "../components/icons";
 import { loadFromJSON, saveAsJSON } from "../data";
 import { isImageFileHandle } from "../data/blob";
-import { nativeFileSystemSupported } from "../data/filesystem";
+import {
+  ensureFileHandlePermission,
+  nativeFileSystemSupported,
+} from "../data/filesystem";
 
 import { resaveAsImageWithScene } from "../data/resave";
 
@@ -293,6 +296,35 @@ function prepareDataForJSONExport(
   };
 }
 
+const saveToExistingFileHandle = async ({
+  data,
+  fileHandle,
+  filename,
+}: {
+  data: Promise<JSONExportData>;
+  fileHandle: AppState["fileHandle"];
+  filename: string;
+}) => {
+  if (!fileHandle) {
+    return { fileHandle: null };
+  }
+
+  const isWritable = await ensureFileHandlePermission(fileHandle, "readwrite");
+  if (!isWritable) {
+    throw new Error(
+      "Write access was not granted. The file is currently only saved in browser cache.",
+    );
+  }
+
+  return isImageFileHandle(fileHandle)
+    ? resaveAsImageWithScene(data, fileHandle, filename)
+    : saveAsJSON({
+        data,
+        filename,
+        fileHandle,
+      });
+};
+
 // ---------------------------------------------------------------------------
 // Save actions
 // ---------------------------------------------------------------------------
@@ -322,17 +354,11 @@ export const actionSaveToActiveFile = register({
       prepareDataForJSONExport(elements, appState, app.files, app);
 
     try {
-      const { fileHandle } = isImageFileHandle(previousFileHandle)
-        ? await resaveAsImageWithScene(
-            exportedDataPromise,
-            previousFileHandle,
-            filename,
-          )
-        : await saveAsJSON({
-            data: exportedDataPromise,
-            filename,
-            fileHandle: previousFileHandle,
-          });
+      const { fileHandle } = await saveToExistingFileHandle({
+        data: exportedDataPromise,
+        fileHandle: previousFileHandle,
+        filename,
+      });
 
       return {
         captureUpdate: CaptureUpdateAction.NEVER,
@@ -448,14 +474,49 @@ export const actionLoadScene = register({
   },
   perform: async (elements, appState, _, app) => {
     try {
+      if (appState.fileHandle) {
+        const { abortController, data: exportedDataPromise } =
+          prepareDataForJSONExport(elements, appState, app.files, app);
+
+        try {
+          await saveToExistingFileHandle({
+            data: exportedDataPromise,
+            fileHandle: appState.fileHandle,
+            filename: app.getName(),
+          });
+        } catch (error) {
+          abortController.abort();
+          throw error;
+        }
+      }
+
       const {
         elements: loadedElements,
         appState: loadedAppState,
         files,
-      } = await loadFromJSON(appState, elements);
+        fileAccess,
+      } = await loadFromJSON(appState, elements, {
+        requestWriteAccess: true,
+      });
+      if (fileAccess) {
+        console.warn("loadScene file access diagnostic", fileAccess);
+      }
       return {
         elements: loadedElements,
-        appState: loadedAppState,
+        appState: fileAccess?.writePermissionGranted
+          ? loadedAppState
+          : {
+              ...loadedAppState,
+              toast: {
+                message: !fileAccess?.nativeFileSystem
+                  ? "This browser session is using the legacy file picker, so this file can only be saved to browser cache."
+                  : !fileAccess.hasFileHandle
+                    ? "Chrome loaded the file without a writable file handle. Changes are only being saved to browser cache."
+                    : "Chrome returned a file handle, but write access was not granted. Changes are only being saved to browser cache.",
+                closable: true,
+                duration: 8000,
+              },
+            },
         files,
         captureUpdate: CaptureUpdateAction.IMMEDIATELY,
       };

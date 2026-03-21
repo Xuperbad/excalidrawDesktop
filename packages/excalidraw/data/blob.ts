@@ -454,9 +454,40 @@ export const createFile = (
   mimeType: string,
   name: string | undefined,
 ) => {
-  return new File([blob], name || "", {
+  const file = new File([blob], name || "", {
     type: mimeType,
   });
+
+  if (blob instanceof File) {
+    const source = blob as File & {
+      handle?: FileSystemFileHandle | null;
+      directoryHandle?: FileSystemDirectoryHandle | null;
+      webkitRelativePath?: string;
+    };
+
+    if (source.handle) {
+      (file as File & { handle?: FileSystemFileHandle | null }).handle =
+        source.handle;
+    }
+
+    if (source.directoryHandle) {
+      (
+        file as File & {
+          directoryHandle?: FileSystemDirectoryHandle | null;
+        }
+      ).directoryHandle = source.directoryHandle;
+    }
+
+    if (source.webkitRelativePath) {
+      Object.defineProperty(file, "webkitRelativePath", {
+        configurable: true,
+        enumerable: true,
+        get: () => source.webkitRelativePath,
+      });
+    }
+  }
+
+  return file;
 };
 
 const normalizedFileSymbol = Symbol("fileNormalized");

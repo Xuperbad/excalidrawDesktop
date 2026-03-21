@@ -124,6 +124,7 @@ import {
 import {
   ACTIVE_FILE_AUTOSAVE_TIMEOUT,
   autosaveToActiveFile,
+  ensureActiveFileWritable,
   loadFromActiveFile,
   persistActiveFileHandle,
 } from "./data/ActiveFile";
@@ -736,9 +737,20 @@ const ExcalidrawWrapper = () => {
     files: BinaryFiles,
   ) => {
     if (activeFileHandleRef.current !== appState.fileHandle) {
+      if (activeFileHandleRef.current) {
+        // Flush the previous file before switching the active handle so the
+        // last debounced autosave doesn't get replaced by the newly opened file.
+        LocalData.flushSave();
+        autosaveToDiskRef.current.flush();
+      }
+
       activeFileHandleRef.current = appState.fileHandle;
       persistActiveFileHandle(appState.fileHandle).catch((error) => {
         console.warn("Failed to persist active file handle:", error);
+      });
+
+      ensureActiveFileWritable(appState.fileHandle).catch((error) => {
+        console.warn("Failed to request write permission:", error);
       });
     }
 

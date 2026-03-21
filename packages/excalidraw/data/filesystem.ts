@@ -9,6 +9,70 @@ import { MIME_TYPES } from "@excalidraw/common";
 import { normalizeFile } from "./blob";
 
 type FILE_EXTENSION = Exclude<keyof typeof MIME_TYPES, "binary">;
+type PermissionMode = "read" | "readwrite";
+
+export const queryFileHandlePermission = async (
+  fileHandle: FileSystemFileHandle,
+  mode: PermissionMode,
+) => {
+  try {
+    const permissionQuery = (
+      fileHandle as FileSystemFileHandle & {
+        queryPermission?: (descriptor: {
+          mode: PermissionMode;
+        }) => Promise<PermissionState>;
+      }
+    ).queryPermission;
+
+    if (!permissionQuery) {
+      return false;
+    }
+
+    return (await permissionQuery.call(fileHandle, { mode })) === "granted";
+  } catch (error) {
+    console.warn("Failed to query file permission:", error);
+    return false;
+  }
+};
+
+export const requestFileHandlePermission = async (
+  fileHandle: FileSystemFileHandle,
+  mode: PermissionMode,
+) => {
+  try {
+    const permissionRequest = (
+      fileHandle as FileSystemFileHandle & {
+        requestPermission?: (descriptor: {
+          mode: PermissionMode;
+        }) => Promise<PermissionState>;
+      }
+    ).requestPermission;
+
+    if (!permissionRequest) {
+      return false;
+    }
+
+    return (await permissionRequest.call(fileHandle, { mode })) === "granted";
+  } catch (error) {
+    console.warn("Failed to request file permission:", error);
+    return false;
+  }
+};
+
+export const ensureFileHandlePermission = async (
+  fileHandle: FileSystemFileHandle | null,
+  mode: PermissionMode,
+) => {
+  if (!nativeFileSystemSupported || !fileHandle) {
+    return false;
+  }
+
+  if (await queryFileHandlePermission(fileHandle, mode)) {
+    return true;
+  }
+
+  return requestFileHandlePermission(fileHandle, mode);
+};
 
 export const fileOpen = async <M extends boolean | undefined = false>(opts: {
   extensions?: FILE_EXTENSION[];
