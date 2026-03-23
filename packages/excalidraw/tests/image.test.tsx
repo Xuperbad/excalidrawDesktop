@@ -1,4 +1,4 @@
-import { randomId, reseed } from "@excalidraw/common";
+import { MIME_TYPES, randomId, reseed } from "@excalidraw/common";
 
 import type { FileId } from "@excalidraw/element/types";
 
@@ -36,13 +36,12 @@ describe("image insertion", () => {
 
     reseed(7);
 
-    const generateIdSpy = vi.spyOn(blobModule, "generateIdFromFile");
-    const resizeFileSpy = vi.spyOn(blobModule, "resizeImageFile");
-
-    generateIdSpy.mockImplementation(() =>
+    vi.spyOn(blobModule, "generateIdFromFile").mockImplementation(() =>
       Promise.resolve(randomId() as FileId),
     );
-    resizeFileSpy.mockImplementation((file: File) => Promise.resolve(file));
+    vi.spyOn(blobModule, "resizeImageFile").mockImplementation((file: File) =>
+      Promise.resolve(file),
+    );
 
     Object.assign(document, {
       elementFromPoint: () => GlobalTestState.canvas,
@@ -95,6 +94,33 @@ describe("image insertion", () => {
     );
 
     await assert();
+  });
+
+  it("should store the optimized mimeType for pasted images", async () => {
+    await setupImageTest([SMILEY_IMAGE_DIMENSIONS]);
+
+    vi.mocked(blobModule.generateIdFromFile).mockImplementationOnce(() =>
+      Promise.resolve("fileId" as FileId),
+    );
+    vi.mocked(blobModule.resizeImageFile).mockImplementationOnce(
+      async (file: File) =>
+        new File([new Uint8Array([1, 2, 3])], file.name, {
+          type: MIME_TYPES.jpg,
+        }),
+    );
+
+    document.dispatchEvent(
+      createPasteEvent({
+        files: [await API.loadFile("./fixtures/smiley.png")],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(h.app.files.fileId.mimeType).toBe(MIME_TYPES.jpg);
+      expect(h.app.files.fileId.dataURL.startsWith("data:image/jpeg")).toBe(
+        true,
+      );
+    });
   });
 
   it("should eventually initialize all images added through image tool", async () => {

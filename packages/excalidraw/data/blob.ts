@@ -311,6 +311,107 @@ export const dataURLToString = (dataURL: DataURL) => {
   return base64ToString(dataURL.slice(dataURL.indexOf(",") + 1));
 };
 
+const AUTO_IMAGE_COMPRESSION_QUALITY = 0.8;
+const AUTO_IMAGE_MIN_SAVINGS_RATIO = 0.05;
+const AUTO_IMAGE_JPEG_CONVERSION_MIN_BYTES = 350 * 1024;
+const ALPHA_DETECTION_SAMPLE_SIZE = 64;
+
+const loadImageFromBlob = async (
+  file: Blob | File,
+): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = (error) => {
+      URL.revokeObjectURL(objectUrl);
+      reject(error);
+    };
+
+    image.src = objectUrl;
+  });
+};
+
+const mayHaveTransparency = (mimeType: string) => {
+  return (
+    mimeType === MIME_TYPES.png ||
+    mimeType === MIME_TYPES.webp ||
+    mimeType === MIME_TYPES.avif ||
+    mimeType === MIME_TYPES.gif ||
+    mimeType === MIME_TYPES.ico
+  );
+};
+
+const hasTransparency = async (file: File) => {
+  if (!mayHaveTransparency(file.type)) {
+    return false;
+  }
+
+  try {
+    const image = await loadImageFromBlob(file);
+    const width = Math.max(
+      1,
+      Math.min(ALPHA_DETECTION_SAMPLE_SIZE, image.naturalWidth || image.width),
+    );
+    const height = Math.max(
+      1,
+      Math.min(
+        ALPHA_DETECTION_SAMPLE_SIZE,
+        image.naturalHeight || image.height,
+      ),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+
+    if (!context) {
+      return true;
+    }
+
+    context.clearRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    const { data } = context.getImageData(0, 0, width, height);
+
+    for (let index = 3; index < data.length; index += 4) {
+      if (data[index] < 255) {
+        return true;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    // If we fail to inspect transparency, be conservative and avoid flattening.
+    return true;
+  }
+};
+
+const shouldConvertToJpeg = (
+  file: File,
+  opts: { outputType?: typeof MIME_TYPES["jpg"] },
+  fileHasTransparency: boolean,
+) => {
+  if (opts.outputType === MIME_TYPES.jpg) {
+    return true;
+  }
+
+  if (fileHasTransparency) {
+    return false;
+  }
+
+  return (
+    file.type === MIME_TYPES.jpg ||
+    file.type === MIME_TYPES.jfif ||
+    file.type === MIME_TYPES.bmp ||
+    (file.type === MIME_TYPES.png &&
+      file.size >= AUTO_IMAGE_JPEG_CONVERSION_MIN_BYTES)
+  );
+};
+
 export const resizeImageFile = async (
   file: File,
   opts: {
@@ -351,13 +452,35 @@ export const resizeImageFile = async (
     throw new Error("Error: unsupported file type", { cause: "UNSUPPORTED" });
   }
 
-  return new File(
-    [await reduce.toBlob(file, { max: opts.maxWidthOrHeight, alpha: true })],
-    file.name,
-    {
-      type: opts.outputType || file.type,
-    },
-  );
+  const fileHasTransparency = await hasTransparency(file);
+  const outputType = shouldConvertToJpeg(file, opts, fileHasTransparency)
+    ? MIME_TYPES.jpg
+    : opts.outputType || file.type;
+
+  if (outputType === MIME_TYPES.jpg) {
+    reduce._create_blob = function (env) {
+      return this.pica
+        .toBlob(env.out_canvas, MIME_TYPES.jpg, AUTO_IMAGE_COMPRESSION_QUALITY)
+        .then((blob) => {
+          env.out_blob = blob;
+          return env;
+        });
+    };
+  }
+
+  const optimizedBlob = await reduce.toBlob(file, {
+    max: opts.maxWidthOrHeight,
+    alpha: outputType !== MIME_TYPES.jpg,
+  });
+  const optimizedFile = new File([optimizedBlob], file.name, {
+    type: outputType,
+  });
+
+  if (optimizedFile.size >= file.size * (1 - AUTO_IMAGE_MIN_SAVINGS_RATIO)) {
+    return file;
+  }
+
+  return optimizedFile;
 };
 
 export const SVGStringToFile = (SVGString: string, filename: string = "") => {

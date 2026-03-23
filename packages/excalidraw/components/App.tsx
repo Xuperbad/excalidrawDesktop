@@ -11458,11 +11458,9 @@ class App extends React.Component<AppProps, AppState> {
     if (!isSupportedImageFile(imageFile)) {
       throw new Error(t("errors.unsupportedFileType"));
     }
-    const mimeType = imageFile.type;
-
     setCursor(this.interactiveCanvas, "wait");
 
-    if (mimeType === MIME_TYPES.svg) {
+    if (imageFile.type === MIME_TYPES.svg) {
       try {
         imageFile = SVGStringToFile(
           normalizeSVG(await imageFile.text()),
@@ -11511,6 +11509,7 @@ class App extends React.Component<AppProps, AppState> {
 
     const dataURL =
       this.files[fileId]?.dataURL || (await getDataURL(imageFile));
+    const mimeType = existingFileData?.mimeType || imageFile.type;
 
     return new Promise<NonDeleted<InitializedExcalidrawImageElement>>(
       async (resolve, reject) => {
