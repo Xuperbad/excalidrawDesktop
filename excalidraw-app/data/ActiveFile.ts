@@ -51,7 +51,7 @@ export const loadFromActiveFile = async ({
 }: {
   localAppState: AppState | null;
   localElements: readonly ExcalidrawElement[] | null;
-}): Promise<ImportedDataState | null> => {
+}): Promise<{ data: ImportedDataState; lastModified: number } | null> => {
   if (!nativeFileSystemSupported) {
     return null;
   }
@@ -77,7 +77,16 @@ export const loadFromActiveFile = async ({
 
   try {
     const file = await fileHandle.getFile();
-    return await loadFromBlob(file, localAppState, localElements, fileHandle);
+    const data = await loadFromBlob(
+      file,
+      localAppState,
+      localElements,
+      fileHandle,
+    );
+    return {
+      data,
+      lastModified: file.lastModified,
+    };
   } catch (error: any) {
     console.warn("Failed to restore active file:", error);
 

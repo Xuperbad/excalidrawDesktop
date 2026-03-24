@@ -136,7 +136,10 @@ import {
   LocalData,
   localStorageQuotaExceededAtom,
 } from "./data/LocalData";
-import { isBrowserStorageStateNewer } from "./data/tabSync";
+import {
+  getBrowserStateVersion,
+  isBrowserStorageStateNewer,
+} from "./data/tabSync";
 import { ShareDialog, shareDialogStateAtom } from "./share/ShareDialog";
 import CollabError, { collabErrorIndicatorAtom } from "./collab/CollabError";
 import { useHandleAppTheme } from "./useHandleAppTheme";
@@ -220,6 +223,16 @@ const shareableLinkConfirmDialog = {
   color: "danger",
 } as const;
 
+const getBrowserCacheRestoreDialog = (filename?: string | null) =>
+  ({
+    title: "Restore newer browser backup?",
+    description: filename
+      ? `We found newer changes in this browser than in "${filename}". Restore the newer browser version instead of the older file on disk?`
+      : "We found newer changes in this browser than in the current file on disk. Restore the newer browser version instead?",
+    actionLabel: "Restore browser version",
+    color: "warning",
+  } as const);
+
 const initializeScene = async (opts: {
   collabAPI: CollabAPI | null;
   excalidrawAPI: ExcalidrawImperativeAPI;
@@ -258,17 +271,33 @@ const initializeScene = async (opts: {
     });
 
     if (activeFileData) {
-      scene = {
-        ...activeFileData,
-        elements: restoreElements(activeFileData.elements, null, {
-          repairBindings: true,
-          deleteInvisibleElements: true,
-        }),
-        appState: restoreAppState(
-          activeFileData.appState,
-          localDataState?.appState,
-        ),
-      };
+      const browserStateVersion = getBrowserStateVersion(
+        STORAGE_KEYS.VERSION_DATA_STATE,
+      );
+      const activeFileAppState = activeFileData.data.appState;
+      const activeFileName =
+        activeFileAppState?.fileHandle?.name || activeFileAppState?.name;
+      const shouldOfferBrowserRestore =
+        browserStateVersion > activeFileData.lastModified &&
+        (!!localDataState?.appState || !!localDataState?.elements.length);
+
+      const shouldKeepBrowserState =
+        shouldOfferBrowserRestore &&
+        (await openConfirmModal(getBrowserCacheRestoreDialog(activeFileName)));
+
+      if (!shouldKeepBrowserState) {
+        scene = {
+          ...activeFileData.data,
+          elements: restoreElements(activeFileData.data.elements, null, {
+            repairBindings: true,
+            deleteInvisibleElements: true,
+          }),
+          appState: restoreAppState(
+            activeFileData.data.appState,
+            localDataState?.appState,
+          ),
+        };
+      }
     }
   }
 
@@ -420,6 +449,37 @@ const ExcalidrawWrapper = () => {
 
   const debugCanvasRef = useRef<HTMLCanvasElement>(null);
   const activeFileHandleRef = useRef<FileSystemFileHandle | null>(null);
+  const excalidrawAPIRef = useRef<ExcalidrawImperativeAPI | null>(null);
+  excalidrawAPIRef.current = excalidrawAPI;
+
+  const handleActiveFileAutosaveError = (
+    fileHandle: FileSystemFileHandle | null,
+    error: unknown,
+  ) => {
+    console.warn("Autosave to active file failed:", error);
+
+    if (activeFileHandleRef.current !== fileHandle) {
+      return;
+    }
+
+    activeFileHandleRef.current = null;
+    persistActiveFileHandle(null).catch((persistError) => {
+      console.warn("Failed to clear active file handle:", persistError);
+    });
+    excalidrawAPIRef.current?.updateScene({
+      appState: {
+        fileHandle: null,
+      },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+
+    const autosaveErrorMessage =
+      error instanceof Error && error.message
+        ? `${error.message}\n\nAutosave to the current file was disabled. Recent changes remain in browser storage for this tab.`
+        : "Autosave to the current file failed. Recent changes remain in browser storage for this tab.";
+    setErrorMessage(autosaveErrorMessage);
+  };
+
   const autosaveToDiskRef = useRef(
     debounce(
       (
@@ -432,7 +492,7 @@ const ExcalidrawWrapper = () => {
           appState,
           files,
         }).catch((error) => {
-          console.warn("Autosave to active file failed:", error);
+          handleActiveFileAutosaveError(appState.fileHandle, error);
         });
       },
       ACTIVE_FILE_AUTOSAVE_TIMEOUT,
@@ -749,9 +809,20 @@ const ExcalidrawWrapper = () => {
         console.warn("Failed to persist active file handle:", error);
       });
 
-      ensureActiveFileWritable(appState.fileHandle).catch((error) => {
-        console.warn("Failed to request write permission:", error);
-      });
+      ensureActiveFileWritable(appState.fileHandle)
+        .then((isWritable) => {
+          if (!isWritable && appState.fileHandle) {
+            handleActiveFileAutosaveError(
+              appState.fileHandle,
+              new Error(
+                "Write access was not granted. The file is currently only saved in browser cache.",
+              ),
+            );
+          }
+        })
+        .catch((error) => {
+          handleActiveFileAutosaveError(appState.fileHandle, error);
+        });
     }
 
     if (collabAPI?.isCollaborating()) {
