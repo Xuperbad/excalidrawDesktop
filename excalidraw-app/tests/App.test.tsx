@@ -71,6 +71,10 @@ describe("ExcalidrawApp startup file gate", () => {
     activeFileMocks.persistActiveFileHandle.mockResolvedValue(undefined);
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("requires opening a file before loading any cached scene on startup", async () => {
     const cachedRectangle = API.createElement({
       id: "cached",
@@ -159,6 +163,8 @@ describe("ExcalidrawApp startup file gate", () => {
 
     expect(await screen.findByTestId("last-saved-badge")).toBeTruthy();
 
+    API.updateElement(window.h.elements[0], { x: 40 });
+
     act(() => {
       window.dispatchEvent(new Event("beforeunload"));
     });
@@ -178,5 +184,70 @@ describe("ExcalidrawApp startup file gate", () => {
         /Autosave to the current file was disabled\. Recent changes remain in browser storage for this tab\./,
       ),
     ).toBeTruthy();
+  });
+
+  it("autosaves edited files on the interval without resaving unchanged scenes", async () => {
+    vi.useFakeTimers();
+
+    const fileHandle = {
+      name: "diagram.excalidraw",
+      getFile: vi.fn().mockResolvedValue({
+        lastModified: Date.UTC(2026, 2, 27, 6, 30, 0),
+      }),
+    } as unknown as FileSystemFileHandle;
+    const rectangle = API.createElement({
+      id: "rect",
+      type: "rectangle",
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+    });
+
+    activeFileMocks.autosaveToActiveFile.mockResolvedValue(true);
+    jsonMocks.loadFromJSON.mockResolvedValue({
+      elements: [rectangle],
+      appState: {
+        fileHandle,
+      },
+      files: {},
+      fileAccess: {
+        nativeFileSystem: true,
+        hasFileHandle: true,
+        writePermissionGranted: true,
+      },
+    });
+
+    await render(<ExcalidrawApp />);
+
+    fireEvent.click(await screen.findByTestId("startup-open-file-button"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("startup-file-gate")).toBeNull();
+    });
+
+    API.updateElement(window.h.elements[0], { x: 40 });
+
+    act(() => {
+      vi.advanceTimersByTime(59_000);
+    });
+
+    expect(activeFileMocks.autosaveToActiveFile).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+
+    await waitFor(() => {
+      expect(activeFileMocks.autosaveToActiveFile).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+
+    await waitFor(() => {
+      expect(activeFileMocks.autosaveToActiveFile).toHaveBeenCalledTimes(1);
+    });
   });
 });

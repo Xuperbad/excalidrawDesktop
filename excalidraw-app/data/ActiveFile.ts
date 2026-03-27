@@ -19,7 +19,7 @@ import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
 const activeFileStore = createStore("active-file-db", "active-file-store");
 const ACTIVE_FILE_KEY = "lastActiveFileHandle";
 
-export const ACTIVE_FILE_AUTOSAVE_TIMEOUT = 1500;
+export const ACTIVE_FILE_AUTOSAVE_INTERVAL = 60_000;
 
 export const ensureActiveFileWritable = async (
   fileHandle: FileSystemFileHandle | null,

@@ -49,7 +49,7 @@ import {
   share,
   youtubeIcon,
 } from "@excalidraw/excalidraw/components/icons";
-import { isElementLink } from "@excalidraw/element";
+import { hashElementsVersion, isElementLink } from "@excalidraw/element";
 import {
   bumpElementVersions,
   restoreAppState,
@@ -123,7 +123,7 @@ import {
   importUsernameFromLocalStorage,
 } from "./data/localStorage";
 import {
-  ACTIVE_FILE_AUTOSAVE_TIMEOUT,
+  ACTIVE_FILE_AUTOSAVE_INTERVAL,
   autosaveToActiveFile,
   ensureActiveFileWritable,
   persistActiveFileHandle,
@@ -269,6 +269,17 @@ const formatLastSavedLabel = (timestamp: number | null) => {
     dateStyle: "short",
     timeStyle: "short",
   }).format(timestamp)}`;
+};
+
+const getActiveFileAutosaveFingerprint = (
+  elements: readonly OrderedExcalidrawElement[],
+  appState: AppState,
+) => {
+  return [
+    hashElementsVersion(elements),
+    appState.name || "",
+    appState.viewBackgroundColor,
+  ].join(":");
 };
 
 const initializeScene = async (opts: {
@@ -469,37 +480,47 @@ const ExcalidrawWrapper = () => {
     number | null
   >(null);
   const startupFileSelectionRequiredRef = useRef(requiresStartupFileSelection);
+  const pendingActiveFileAutosaveRef = useRef<{
+    elements: readonly OrderedExcalidrawElement[];
+    appState: AppState;
+    files: BinaryFiles;
+    fingerprint: string;
+  } | null>(null);
+  const lastAutosavedActiveFileFingerprintRef = useRef<string | null>(null);
+  const isAutosavingToActiveFileRef = useRef(false);
   excalidrawAPIRef.current = excalidrawAPI;
   startupFileSelectionRequiredRef.current = requiresStartupFileSelection;
 
-  const handleActiveFileAutosaveError = (
-    fileHandle: FileSystemFileHandle | null,
-    error: unknown,
-  ) => {
-    console.warn("Autosave to active file failed:", error);
+  const handleActiveFileAutosaveError = useCallback(
+    (fileHandle: FileSystemFileHandle | null, error: unknown) => {
+      console.warn("Autosave to active file failed:", error);
 
-    if (activeFileHandleRef.current !== fileHandle) {
-      return;
-    }
+      if (activeFileHandleRef.current !== fileHandle) {
+        return;
+      }
 
-    activeFileHandleRef.current = null;
-    setActiveFileLastModified(null);
-    persistActiveFileHandle(null).catch((persistError) => {
-      console.warn("Failed to clear active file handle:", persistError);
-    });
-    excalidrawAPIRef.current?.updateScene({
-      appState: {
-        fileHandle: null,
-      },
-      captureUpdate: CaptureUpdateAction.NEVER,
-    });
+      activeFileHandleRef.current = null;
+      pendingActiveFileAutosaveRef.current = null;
+      lastAutosavedActiveFileFingerprintRef.current = null;
+      setActiveFileLastModified(null);
+      persistActiveFileHandle(null).catch((persistError) => {
+        console.warn("Failed to clear active file handle:", persistError);
+      });
+      excalidrawAPIRef.current?.updateScene({
+        appState: {
+          fileHandle: null,
+        },
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
 
-    const autosaveErrorMessage =
-      error instanceof Error && error.message
-        ? `${error.message}\n\nAutosave to the current file was disabled. Recent changes remain in browser storage for this tab.`
-        : "Autosave to the current file failed. Recent changes remain in browser storage for this tab.";
-    setErrorMessage(autosaveErrorMessage);
-  };
+      const autosaveErrorMessage =
+        error instanceof Error && error.message
+          ? `${error.message}\n\nAutosave to the current file was disabled. Recent changes remain in browser storage for this tab.`
+          : "Autosave to the current file failed. Recent changes remain in browser storage for this tab.";
+      setErrorMessage(autosaveErrorMessage);
+    },
+    [],
+  );
 
   const refreshActiveFileLastModified = useCallback(
     async (fileHandle: FileSystemFileHandle | null) => {
@@ -520,28 +541,48 @@ const ExcalidrawWrapper = () => {
     [],
   );
 
-  const autosaveToDiskRef = useRef(
-    debounce(
-      (
-        elements: readonly OrderedExcalidrawElement[],
-        appState: AppState,
-        files: BinaryFiles,
-      ) => {
-        autosaveToActiveFile({
-          elements,
-          appState,
-          files,
-        })
-          .then(() => {
-            refreshActiveFileLastModified(appState.fileHandle);
-          })
-          .catch((error) => {
-            handleActiveFileAutosaveError(appState.fileHandle, error);
-          });
-      },
-      ACTIVE_FILE_AUTOSAVE_TIMEOUT,
-    ),
-  );
+  const flushPendingActiveFileAutosave = useCallback(() => {
+    if (isAutosavingToActiveFileRef.current) {
+      return;
+    }
+
+    const pendingAutosave = pendingActiveFileAutosaveRef.current;
+
+    if (!pendingAutosave?.appState.fileHandle) {
+      return;
+    }
+
+    pendingActiveFileAutosaveRef.current = null;
+    isAutosavingToActiveFileRef.current = true;
+
+    autosaveToActiveFile({
+      elements: pendingAutosave.elements,
+      appState: pendingAutosave.appState,
+      files: pendingAutosave.files,
+    })
+      .then(() => {
+        if (
+          activeFileHandleRef.current === pendingAutosave.appState.fileHandle
+        ) {
+          lastAutosavedActiveFileFingerprintRef.current =
+            pendingAutosave.fingerprint;
+          refreshActiveFileLastModified(pendingAutosave.appState.fileHandle);
+        }
+      })
+      .catch((error) => {
+        handleActiveFileAutosaveError(
+          pendingAutosave.appState.fileHandle,
+          error,
+        );
+      })
+      .finally(() => {
+        isAutosavingToActiveFileRef.current = false;
+
+        if (pendingActiveFileAutosaveRef.current) {
+          flushPendingActiveFileAutosave();
+        }
+      });
+  }, [handleActiveFileAutosaveError, refreshActiveFileLastModified]);
 
   useEffect(() => {
     trackEvent("load", "frame", getFrame());
@@ -832,11 +873,13 @@ const ExcalidrawWrapper = () => {
 
     const onUnload = () => {
       LocalData.flushSave();
+      flushPendingActiveFileAutosave();
     };
 
     const visibilityChange = (event: FocusEvent | Event) => {
       if (event.type === EVENT.BLUR || document.hidden) {
         LocalData.flushSave();
+        flushPendingActiveFileAutosave();
       }
       if (
         event.type === EVENT.VISIBILITY_CHANGE ||
@@ -862,12 +905,19 @@ const ExcalidrawWrapper = () => {
         false,
       );
     };
-  }, [isCollabDisabled, collabAPI, excalidrawAPI, setLangCode, loadImages]);
+  }, [
+    isCollabDisabled,
+    collabAPI,
+    excalidrawAPI,
+    setLangCode,
+    loadImages,
+    flushPendingActiveFileAutosave,
+  ]);
 
   useEffect(() => {
     const unloadHandler = (event: BeforeUnloadEvent) => {
       LocalData.flushSave();
-      autosaveToDiskRef.current.flush();
+      flushPendingActiveFileAutosave();
 
       if (
         excalidrawAPI &&
@@ -888,35 +938,46 @@ const ExcalidrawWrapper = () => {
     return () => {
       window.removeEventListener(EVENT.BEFORE_UNLOAD, unloadHandler);
     };
-  }, [excalidrawAPI]);
+  }, [excalidrawAPI, flushPendingActiveFileAutosave]);
 
   useEffect(() => {
-    const autosaveToDisk = autosaveToDiskRef.current;
+    const autosaveInterval = window.setInterval(() => {
+      flushPendingActiveFileAutosave();
+    }, ACTIVE_FILE_AUTOSAVE_INTERVAL);
 
     return () => {
-      autosaveToDisk.cancel();
+      window.clearInterval(autosaveInterval);
     };
-  }, []);
+  }, [flushPendingActiveFileAutosave]);
 
   const onChange = (
     elements: readonly OrderedExcalidrawElement[],
     appState: AppState,
     files: BinaryFiles,
   ) => {
+    const autosaveFingerprint = getActiveFileAutosaveFingerprint(
+      elements,
+      appState,
+    );
+
     if (startupFileSelectionRequiredRef.current) {
-      autosaveToDiskRef.current.cancel();
+      pendingActiveFileAutosaveRef.current = null;
       return;
     }
 
     if (activeFileHandleRef.current !== appState.fileHandle) {
       if (activeFileHandleRef.current) {
         // Flush the previous file before switching the active handle so the
-        // last debounced autosave doesn't get replaced by the newly opened file.
+        // last pending autosave doesn't get replaced by the newly opened file.
         LocalData.flushSave();
-        autosaveToDiskRef.current.flush();
+        flushPendingActiveFileAutosave();
       }
 
       activeFileHandleRef.current = appState.fileHandle;
+      pendingActiveFileAutosaveRef.current = null;
+      lastAutosavedActiveFileFingerprintRef.current = appState.fileHandle
+        ? autosaveFingerprint
+        : null;
       persistActiveFileHandle(appState.fileHandle).catch((error) => {
         console.warn("Failed to persist active file handle:", error);
       });
@@ -939,7 +1000,7 @@ const ExcalidrawWrapper = () => {
     }
 
     if (collabAPI?.isCollaborating()) {
-      autosaveToDiskRef.current.cancel();
+      pendingActiveFileAutosaveRef.current = null;
       collabAPI.syncElements(elements);
     }
 
@@ -976,9 +1037,18 @@ const ExcalidrawWrapper = () => {
     }
 
     if (!collabAPI?.isCollaborating() && appState.fileHandle) {
-      autosaveToDiskRef.current(elements, appState, files);
+      if (
+        autosaveFingerprint !== lastAutosavedActiveFileFingerprintRef.current
+      ) {
+        pendingActiveFileAutosaveRef.current = {
+          elements,
+          appState,
+          files,
+          fingerprint: autosaveFingerprint,
+        };
+      }
     } else {
-      autosaveToDiskRef.current.cancel();
+      pendingActiveFileAutosaveRef.current = null;
     }
 
     // Render the debug scene if the debug canvas is available
