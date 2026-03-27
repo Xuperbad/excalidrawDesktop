@@ -1,10 +1,10 @@
 import React from "react";
 import { vi } from "vitest";
 
-import { CaptureUpdateAction } from "@excalidraw/excalidraw";
 import { API } from "@excalidraw/excalidraw/tests/helpers/api";
 import {
   act,
+  fireEvent,
   render,
   screen,
   unmountComponent,
@@ -22,9 +22,9 @@ const activeFileMocks = vi.hoisted(() => {
   };
 });
 
-const overwriteConfirmMocks = vi.hoisted(() => {
+const jsonMocks = vi.hoisted(() => {
   return {
-    openConfirmModal: vi.fn(),
+    loadFromJSON: vi.fn(),
   };
 });
 
@@ -42,23 +42,18 @@ vi.mock("../../excalidraw-app/data/ActiveFile", async () => {
   };
 });
 
-vi.mock(
-  "@excalidraw/excalidraw/components/OverwriteConfirm/OverwriteConfirmState",
-  async () => {
-    const actual = await vi.importActual<
-      typeof import("@excalidraw/excalidraw/components/OverwriteConfirm/OverwriteConfirmState")
-    >(
-      "@excalidraw/excalidraw/components/OverwriteConfirm/OverwriteConfirmState",
-    );
+vi.mock("@excalidraw/excalidraw/data/json", async () => {
+  const actual = await vi.importActual<
+    typeof import("@excalidraw/excalidraw/data/json")
+  >("@excalidraw/excalidraw/data/json");
 
-    return {
-      ...actual,
-      openConfirmModal: overwriteConfirmMocks.openConfirmModal,
-    };
-  },
-);
+  return {
+    ...actual,
+    loadFromJSON: jsonMocks.loadFromJSON,
+  };
+});
 
-describe("ExcalidrawApp autosave recovery", () => {
+describe("ExcalidrawApp startup file gate", () => {
   beforeEach(() => {
     unmountComponent();
     localStorage.clear();
@@ -66,7 +61,7 @@ describe("ExcalidrawApp autosave recovery", () => {
     activeFileMocks.ensureActiveFileWritable.mockReset();
     activeFileMocks.loadFromActiveFile.mockReset();
     activeFileMocks.persistActiveFileHandle.mockReset();
-    overwriteConfirmMocks.openConfirmModal.mockReset();
+    jsonMocks.loadFromJSON.mockReset();
 
     activeFileMocks.autosaveToActiveFile.mockRejectedValue(
       new Error("Disk autosave failed"),
@@ -74,16 +69,64 @@ describe("ExcalidrawApp autosave recovery", () => {
     activeFileMocks.ensureActiveFileWritable.mockResolvedValue(true);
     activeFileMocks.loadFromActiveFile.mockResolvedValue(null);
     activeFileMocks.persistActiveFileHandle.mockResolvedValue(undefined);
-    overwriteConfirmMocks.openConfirmModal.mockResolvedValue(false);
   });
 
-  it("disables the active file after autosave failures so stale files are not restored later", async () => {
+  it("requires opening a file before loading any cached scene on startup", async () => {
+    const cachedRectangle = API.createElement({
+      id: "cached",
+      type: "rectangle",
+      x: 10,
+      y: 10,
+      width: 120,
+      height: 80,
+    });
+
+    await render(<ExcalidrawApp />, {
+      localStorageData: {
+        elements: [cachedRectangle],
+        appState: {},
+      },
+    });
+
+    expect(await screen.findByTestId("startup-file-gate")).toBeTruthy();
+    expect(screen.getByTestId("startup-open-file-button")).toBeTruthy();
+    expect(window.h.elements).toHaveLength(0);
+    expect(window.h.elements.map((element) => element.id)).not.toContain(
+      "cached",
+    );
+  });
+
+  it("keeps the startup gate open when the selected file has no writable handle", async () => {
+    jsonMocks.loadFromJSON.mockResolvedValue({
+      elements: [],
+      appState: {
+        fileHandle: null,
+      },
+      files: {},
+      fileAccess: {
+        nativeFileSystem: true,
+        hasFileHandle: false,
+        writePermissionGranted: false,
+      },
+    });
+
     await render(<ExcalidrawApp />);
 
+    fireEvent.click(await screen.findByTestId("startup-open-file-button"));
+
+    expect(
+      await screen.findByText(/opened without a persistent file handle/i),
+    ).toBeTruthy();
+    expect(screen.getByTestId("startup-file-gate")).toBeTruthy();
+  });
+
+  it("disables the active file after autosave failures once the startup file is opened", async () => {
     const fileHandle = {
       name: "diagram.excalidraw",
-    } as FileSystemFileHandle;
-
+      getFile: vi.fn().mockResolvedValue({
+        lastModified: Date.UTC(2026, 2, 27, 6, 30, 0),
+      }),
+    } as unknown as FileSystemFileHandle;
     const rectangle = API.createElement({
       id: "rect",
       type: "rectangle",
@@ -93,13 +136,28 @@ describe("ExcalidrawApp autosave recovery", () => {
       height: 100,
     });
 
-    API.updateScene({
+    jsonMocks.loadFromJSON.mockResolvedValue({
       elements: [rectangle],
       appState: {
         fileHandle,
       },
-      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      files: {},
+      fileAccess: {
+        nativeFileSystem: true,
+        hasFileHandle: true,
+        writePermissionGranted: true,
+      },
     });
+
+    await render(<ExcalidrawApp />);
+
+    fireEvent.click(await screen.findByTestId("startup-open-file-button"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("startup-file-gate")).toBeNull();
+    });
+
+    expect(await screen.findByTestId("last-saved-badge")).toBeTruthy();
 
     act(() => {
       window.dispatchEvent(new Event("beforeunload"));
@@ -120,62 +178,5 @@ describe("ExcalidrawApp autosave recovery", () => {
         /Autosave to the current file was disabled\. Recent changes remain in browser storage for this tab\./,
       ),
     ).toBeTruthy();
-  });
-
-  it("asks before replacing a newer browser backup with an older active file", async () => {
-    localStorage.setItem(
-      "version-dataState",
-      JSON.stringify(Date.now() + 10_000),
-    );
-
-    const localRectangle = API.createElement({
-      id: "local",
-      type: "rectangle",
-      x: 10,
-      y: 10,
-      width: 120,
-      height: 80,
-    });
-
-    activeFileMocks.loadFromActiveFile.mockResolvedValue({
-      data: {
-        elements: [
-          API.createElement({
-            id: "disk",
-            type: "rectangle",
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 100,
-          }),
-        ],
-        appState: {
-          fileHandle: {
-            name: "diagram.excalidraw",
-          } as FileSystemFileHandle,
-        },
-        files: {},
-      },
-      lastModified: Date.now(),
-    });
-    overwriteConfirmMocks.openConfirmModal.mockResolvedValue(true);
-
-    await render(<ExcalidrawApp />, {
-      localStorageData: {
-        elements: [localRectangle],
-        appState: {},
-      },
-    });
-
-    expect(overwriteConfirmMocks.openConfirmModal).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: "Restore newer browser backup?",
-        actionLabel: "Restore browser version",
-      }),
-    );
-    expect(window.h.elements.map((element) => element.id)).toContain("local");
-    expect(window.h.elements.map((element) => element.id)).not.toContain(
-      "disk",
-    );
   });
 });

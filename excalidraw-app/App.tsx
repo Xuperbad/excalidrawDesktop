@@ -36,6 +36,7 @@ import {
 import polyfill from "@excalidraw/excalidraw/polyfill";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadFromBlob } from "@excalidraw/excalidraw/data/blob";
+import { loadFromJSON } from "@excalidraw/excalidraw/data/json";
 import { t } from "@excalidraw/excalidraw/i18n";
 
 import {
@@ -125,7 +126,6 @@ import {
   ACTIVE_FILE_AUTOSAVE_TIMEOUT,
   autosaveToActiveFile,
   ensureActiveFileWritable,
-  loadFromActiveFile,
   persistActiveFileHandle,
 } from "./data/ActiveFile";
 
@@ -137,8 +137,8 @@ import {
   localStorageQuotaExceededAtom,
 } from "./data/LocalData";
 import {
-  getBrowserStateVersion,
   isBrowserStorageStateNewer,
+  resetBrowserStateVersions,
 } from "./data/tabSync";
 import { ShareDialog, shareDialogStateAtom } from "./share/ShareDialog";
 import CollabError, { collabErrorIndicatorAtom } from "./collab/CollabError";
@@ -223,15 +223,53 @@ const shareableLinkConfirmDialog = {
   color: "danger",
 } as const;
 
-const getBrowserCacheRestoreDialog = (filename?: string | null) =>
-  ({
-    title: "Restore newer browser backup?",
-    description: filename
-      ? `We found newer changes in this browser than in "${filename}". Restore the newer browser version instead of the older file on disk?`
-      : "We found newer changes in this browser than in the current file on disk. Restore the newer browser version instead?",
-    actionLabel: "Restore browser version",
-    color: "warning",
-  } as const);
+const getStartupLaunchState = () => {
+  const searchParams = new URLSearchParams(window.location.search);
+  const id = searchParams.get("id");
+  const jsonBackendMatch = window.location.hash.match(
+    /^#json=([a-zA-Z0-9_-]+),([a-zA-Z0-9_-]+)$/,
+  );
+  const externalUrlMatch = window.location.hash.match(/^#url=(.*)$/);
+  const roomLinkData = getCollaborationLinkData(window.location.href);
+  const isExternalScene = !!(id || jsonBackendMatch || roomLinkData);
+
+  return {
+    id,
+    jsonBackendMatch,
+    externalUrlMatch,
+    roomLinkData,
+    isExternalScene,
+    requiresExplicitFileOpen: !isExternalScene && !externalUrlMatch,
+  };
+};
+
+const getStartupFileSelectionErrorMessage = (fileAccess?: {
+  nativeFileSystem: boolean;
+  hasFileHandle: boolean;
+  writePermissionGranted: boolean;
+}) => {
+  if (!fileAccess?.nativeFileSystem) {
+    return "This browser session cannot keep a writable file handle. Please use a browser window that supports the File System Access API.";
+  }
+  if (!fileAccess.hasFileHandle) {
+    return "The selected file was opened without a persistent file handle. Please reopen it from a browser that supports direct file access.";
+  }
+  if (!fileAccess.writePermissionGranted) {
+    return "Write access was not granted. Please reopen the file and allow access so this session stays attached to the file on disk.";
+  }
+  return "Failed to attach the selected file to this session.";
+};
+
+const formatLastSavedLabel = (timestamp: number | null) => {
+  if (!timestamp) {
+    return null;
+  }
+
+  return `Saved ${new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(timestamp)}`;
+};
 
 const initializeScene = async (opts: {
   collabAPI: CollabAPI | null;
@@ -242,12 +280,12 @@ const initializeScene = async (opts: {
     | { isExternalScene: false; id?: null; key?: null }
   )
 > => {
-  const searchParams = new URLSearchParams(window.location.search);
-  const id = searchParams.get("id");
-  const jsonBackendMatch = window.location.hash.match(
-    /^#json=([a-zA-Z0-9_-]+),([a-zA-Z0-9_-]+)$/,
-  );
-  const externalUrlMatch = window.location.hash.match(/^#url=(.*)$/);
+  const {
+    jsonBackendMatch,
+    externalUrlMatch,
+    isExternalScene,
+    requiresExplicitFileOpen,
+  } = getStartupLaunchState();
 
   const localDataState = importFromLocalStorage();
 
@@ -262,43 +300,16 @@ const initializeScene = async (opts: {
     appState: restoreAppState(localDataState?.appState, null),
   };
 
-  let roomLinkData = getCollaborationLinkData(window.location.href);
-  const isExternalScene = !!(id || jsonBackendMatch || roomLinkData);
-  if (!isExternalScene && !externalUrlMatch) {
-    const activeFileData = await loadFromActiveFile({
-      localAppState: opts.excalidrawAPI.getAppState(),
-      localElements: localDataState?.elements || null,
-    });
-
-    if (activeFileData) {
-      const browserStateVersion = getBrowserStateVersion(
-        STORAGE_KEYS.VERSION_DATA_STATE,
-      );
-      const activeFileAppState = activeFileData.data.appState;
-      const activeFileName =
-        activeFileAppState?.fileHandle?.name || activeFileAppState?.name;
-      const shouldOfferBrowserRestore =
-        browserStateVersion > activeFileData.lastModified &&
-        (!!localDataState?.appState || !!localDataState?.elements.length);
-
-      const shouldKeepBrowserState =
-        shouldOfferBrowserRestore &&
-        (await openConfirmModal(getBrowserCacheRestoreDialog(activeFileName)));
-
-      if (!shouldKeepBrowserState) {
-        scene = {
-          ...activeFileData.data,
-          elements: restoreElements(activeFileData.data.elements, null, {
-            repairBindings: true,
-            deleteInvisibleElements: true,
-          }),
-          appState: restoreAppState(
-            activeFileData.data.appState,
-            localDataState?.appState,
-          ),
-        };
-      }
-    }
+  let roomLinkData = getStartupLaunchState().roomLinkData;
+  if (requiresExplicitFileOpen) {
+    resetBrowserStateVersions();
+    scene = {
+      elements: [],
+      appState: {
+        ...restoreAppState(localDataState?.appState, null),
+        showWelcomeScreen: true,
+      },
+    };
   }
 
   if (isExternalScene) {
@@ -450,7 +461,16 @@ const ExcalidrawWrapper = () => {
   const debugCanvasRef = useRef<HTMLCanvasElement>(null);
   const activeFileHandleRef = useRef<FileSystemFileHandle | null>(null);
   const excalidrawAPIRef = useRef<ExcalidrawImperativeAPI | null>(null);
+  const [requiresStartupFileSelection, setRequiresStartupFileSelection] =
+    useState(() => getStartupLaunchState().requiresExplicitFileOpen);
+  const [startupFileSelectionError, setStartupFileSelectionError] =
+    useState("");
+  const [activeFileLastModified, setActiveFileLastModified] = useState<
+    number | null
+  >(null);
+  const startupFileSelectionRequiredRef = useRef(requiresStartupFileSelection);
   excalidrawAPIRef.current = excalidrawAPI;
+  startupFileSelectionRequiredRef.current = requiresStartupFileSelection;
 
   const handleActiveFileAutosaveError = (
     fileHandle: FileSystemFileHandle | null,
@@ -463,6 +483,7 @@ const ExcalidrawWrapper = () => {
     }
 
     activeFileHandleRef.current = null;
+    setActiveFileLastModified(null);
     persistActiveFileHandle(null).catch((persistError) => {
       console.warn("Failed to clear active file handle:", persistError);
     });
@@ -480,6 +501,25 @@ const ExcalidrawWrapper = () => {
     setErrorMessage(autosaveErrorMessage);
   };
 
+  const refreshActiveFileLastModified = useCallback(
+    async (fileHandle: FileSystemFileHandle | null) => {
+      if (!fileHandle) {
+        setActiveFileLastModified(null);
+        return;
+      }
+
+      try {
+        const file = await fileHandle.getFile();
+        if (excalidrawAPIRef.current?.getAppState().fileHandle === fileHandle) {
+          setActiveFileLastModified(file.lastModified);
+        }
+      } catch (error) {
+        console.warn("Failed to read active file metadata:", error);
+      }
+    },
+    [],
+  );
+
   const autosaveToDiskRef = useRef(
     debounce(
       (
@@ -491,9 +531,13 @@ const ExcalidrawWrapper = () => {
           elements,
           appState,
           files,
-        }).catch((error) => {
-          handleActiveFileAutosaveError(appState.fileHandle, error);
-        });
+        })
+          .then(() => {
+            refreshActiveFileLastModified(appState.fileHandle);
+          })
+          .catch((error) => {
+            handleActiveFileAutosaveError(appState.fileHandle, error);
+          });
       },
       ACTIVE_FILE_AUTOSAVE_TIMEOUT,
     ),
@@ -536,7 +580,7 @@ const ExcalidrawWrapper = () => {
       }
       forceRefresh((prev) => !prev);
     }
-  }, [excalidrawAPI]);
+  }, [excalidrawAPI, refreshActiveFileLastModified]);
 
   // ---------------------------------------------------------------------------
   // Hoisted loadImages
@@ -627,12 +671,67 @@ const ExcalidrawWrapper = () => {
     [collabAPI, excalidrawAPI],
   );
 
+  const openStartupFile = useCallback(async () => {
+    if (!excalidrawAPI) {
+      return;
+    }
+
+    setStartupFileSelectionError("");
+
+    try {
+      const { elements, appState, files, fileAccess } = await loadFromJSON(
+        excalidrawAPI.getAppState(),
+        excalidrawAPI.getSceneElementsIncludingDeleted(),
+        {
+          requestWriteAccess: true,
+        },
+      );
+
+      if (!fileAccess?.writePermissionGranted || !appState.fileHandle) {
+        setStartupFileSelectionError(
+          getStartupFileSelectionErrorMessage(fileAccess),
+        );
+        return;
+      }
+
+      startupFileSelectionRequiredRef.current = false;
+      setRequiresStartupFileSelection(false);
+      excalidrawAPI.updateScene({
+        elements,
+        appState: {
+          ...appState,
+          showWelcomeScreen: false,
+          toast: null,
+        },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+
+      const loadedFiles = Object.values(files || {});
+      if (loadedFiles.length) {
+        excalidrawAPI.addFiles(loadedFiles);
+      }
+      refreshActiveFileLastModified(appState.fileHandle);
+    } catch (error: any) {
+      if (error?.name === "AbortError") {
+        return;
+      }
+      setStartupFileSelectionError(
+        error?.message || "Failed to open the selected file.",
+      );
+    }
+  }, [excalidrawAPI, refreshActiveFileLastModified]);
+
   useEffect(() => {
     if (!excalidrawAPI || (!isCollabDisabled && !collabAPI)) {
       return;
     }
 
     initializeScene({ collabAPI, excalidrawAPI }).then(async (data) => {
+      setRequiresStartupFileSelection(
+        getStartupLaunchState().requiresExplicitFileOpen,
+      );
+      setStartupFileSelectionError("");
+      setActiveFileLastModified(null);
       loadImages(data, /* isInitialLoad */ true);
       initialStatePromiseRef.current.promise.resolve(data.scene);
     });
@@ -650,6 +749,11 @@ const ExcalidrawWrapper = () => {
         excalidrawAPI.updateScene({ appState: { isLoading: true } });
 
         initializeScene({ collabAPI, excalidrawAPI }).then((data) => {
+          setRequiresStartupFileSelection(
+            getStartupLaunchState().requiresExplicitFileOpen,
+          );
+          setStartupFileSelectionError("");
+          setActiveFileLastModified(null);
           loadImages(data);
           if (data.scene) {
             excalidrawAPI.updateScene({
@@ -666,6 +770,9 @@ const ExcalidrawWrapper = () => {
 
     const syncData = debounce(() => {
       if (isTestEnv()) {
+        return;
+      }
+      if (startupFileSelectionRequiredRef.current) {
         return;
       }
       if (
@@ -796,6 +903,11 @@ const ExcalidrawWrapper = () => {
     appState: AppState,
     files: BinaryFiles,
   ) => {
+    if (startupFileSelectionRequiredRef.current) {
+      autosaveToDiskRef.current.cancel();
+      return;
+    }
+
     if (activeFileHandleRef.current !== appState.fileHandle) {
       if (activeFileHandleRef.current) {
         // Flush the previous file before switching the active handle so the
@@ -808,6 +920,7 @@ const ExcalidrawWrapper = () => {
       persistActiveFileHandle(appState.fileHandle).catch((error) => {
         console.warn("Failed to persist active file handle:", error);
       });
+      refreshActiveFileLastModified(appState.fileHandle);
 
       ensureActiveFileWritable(appState.fileHandle)
         .then((isWritable) => {
@@ -1055,7 +1168,7 @@ const ExcalidrawWrapper = () => {
 
   return (
     <div
-      style={{ height: "100%" }}
+      style={{ height: "100%", position: "relative" }}
       className={clsx("excalidraw-app", {
         "is-collaborating": isCollaborating,
       })}
@@ -1167,7 +1280,10 @@ const ExcalidrawWrapper = () => {
             </OverwriteConfirmDialog.Action>
           )}
         </OverwriteConfirmDialog>
-        <AppFooter onChange={() => excalidrawAPI?.refresh()} />
+        <AppFooter
+          onChange={() => excalidrawAPI?.refresh()}
+          lastSavedLabel={formatLastSavedLabel(activeFileLastModified)}
+        />
         {excalidrawAPI && <AIComponents excalidrawAPI={excalidrawAPI} />}
 
         <TTDDialogTrigger />
@@ -1414,6 +1530,75 @@ const ExcalidrawWrapper = () => {
           />
         )}
       </Excalidraw>
+      {requiresStartupFileSelection && (
+        <div
+          data-testid="startup-file-gate"
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 10,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            background:
+              "linear-gradient(180deg, rgba(17, 24, 39, 0.42), rgba(17, 24, 39, 0.58))",
+            backdropFilter: "blur(6px)",
+          }}
+        >
+          <div
+            style={{
+              width: "min(520px, 100%)",
+              borderRadius: 20,
+              padding: 24,
+              background: "rgba(255, 255, 255, 0.96)",
+              boxShadow: "0 24px 60px rgba(15, 23, 42, 0.22)",
+              color: "#111827",
+            }}
+          >
+            <h2 style={{ margin: 0, fontSize: 24, lineHeight: 1.2 }}>
+              Open the working file before editing
+            </h2>
+            <p style={{ margin: "12px 0 0", lineHeight: 1.6 }}>
+              This app now starts in file-open mode to avoid restoring an old
+              browser cache by mistake. Pick the actual file you want to work
+              on, and this session will stay attached to that file handle.
+            </p>
+            {startupFileSelectionError && (
+              <p
+                style={{
+                  margin: "16px 0 0",
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  background: "#fef2f2",
+                  color: "#991b1b",
+                  lineHeight: 1.5,
+                }}
+              >
+                {startupFileSelectionError}
+              </p>
+            )}
+            <button
+              type="button"
+              data-testid="startup-open-file-button"
+              onClick={() => openStartupFile()}
+              style={{
+                marginTop: 18,
+                border: 0,
+                borderRadius: 999,
+                padding: "12px 18px",
+                fontSize: 15,
+                fontWeight: 600,
+                background: "#111827",
+                color: "#ffffff",
+                cursor: "pointer",
+              }}
+            >
+              Open file to continue
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
