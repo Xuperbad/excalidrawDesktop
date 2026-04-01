@@ -8,7 +8,10 @@ import {
   SVG_DOCUMENT_PREAMBLE,
 } from "@excalidraw/common";
 
-import { getNonDeletedElements } from "@excalidraw/element";
+import {
+  getNonDeletedElements,
+  isInitializedImageElement,
+} from "@excalidraw/element";
 
 import { isFrameLikeElement } from "@excalidraw/element";
 
@@ -29,7 +32,7 @@ import { t } from "../i18n";
 import { getSelectedElements, isSomeElementSelected } from "../scene";
 import { exportToCanvas, exportToSvg } from "../scene/export";
 
-import { canvasToBlob } from "./blob";
+import { canvasToBlob, dataURLToFile } from "./blob";
 import { fileSave } from "./filesystem";
 import { serializeAsJSON } from "./json";
 
@@ -158,14 +161,13 @@ export const exportCanvas = async (
     }
   }
 
-  const tempCanvas = exportToCanvas(elements, appState, files, {
-    exportBackground,
-    viewBackgroundColor,
-    exportPadding,
-    exportingFrame,
-  });
-
   if (type === "png") {
+    const tempCanvas = exportToCanvas(elements, appState, files, {
+      exportBackground,
+      viewBackgroundColor,
+      exportPadding,
+      exportingFrame,
+    });
     let blob = canvasToBlob(tempCanvas);
 
     if (appState.exportEmbedScene) {
@@ -188,7 +190,16 @@ export const exportCanvas = async (
     });
   } else if (type === "clipboard") {
     try {
-      const blob = canvasToBlob(tempCanvas);
+      const blob =
+        getSingleImageElementClipboardBlob(elements, files) ||
+        canvasToBlob(
+          exportToCanvas(elements, appState, files, {
+            exportBackground,
+            viewBackgroundColor,
+            exportPadding,
+            exportingFrame,
+          }),
+        );
       await copyBlobToClipboardAsPng(blob);
     } catch (error: any) {
       console.warn(error);
@@ -211,4 +222,47 @@ export const exportCanvas = async (
     // shouldn't happen
     throw new Error("Unsupported export type");
   }
+};
+
+const getSingleImageElementClipboardBlob = (
+  elements: ExportedElements,
+  files: BinaryFiles,
+): Blob | Promise<Blob> | null => {
+  if (elements.length !== 1 || !isInitializedImageElement(elements[0])) {
+    return null;
+  }
+
+  const fileData = files[elements[0].fileId];
+  if (!fileData?.dataURL) {
+    return null;
+  }
+
+  const file = dataURLToFile(fileData.dataURL, "");
+  if (file.type === MIME_TYPES.png) {
+    return file;
+  }
+
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = async () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth || image.width;
+        canvas.height = image.naturalHeight || image.height;
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          reject(new Error("Failed to create canvas context"));
+          return;
+        }
+
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve(await canvasToBlob(canvas));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    image.onerror = () => reject(new Error("Failed to load image"));
+    image.src = fileData.dataURL;
+  });
 };
