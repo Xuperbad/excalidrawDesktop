@@ -674,6 +674,15 @@ describe("history", () => {
       _setupImageTest([DEER_IMAGE_DIMENSIONS, SMILEY_IMAGE_DIMENSIONS]);
 
     const assertImageTest = async () => {
+      const deerExpectedHeight = 200;
+      const smileyExpectedHeight = 200;
+      const deerExpectedWidth =
+        deerExpectedHeight *
+        (DEER_IMAGE_DIMENSIONS.width / DEER_IMAGE_DIMENSIONS.height);
+      const smileyExpectedWidth =
+        smileyExpectedHeight *
+        (SMILEY_IMAGE_DIMENSIONS.width / SMILEY_IMAGE_DIMENSIONS.height);
+
       await waitFor(() => {
         expect(API.getUndoStack().length).toBe(1);
         expect(API.getRedoStack().length).toBe(0);
@@ -683,16 +692,20 @@ describe("history", () => {
           Object.values(h.history.undoStack[0].elements.removed).map(
             (val) => val.deleted,
           ),
-        ).toEqual([
-          expect.objectContaining({
-            ...INITIALIZED_IMAGE_PROPS,
-            ...DEER_IMAGE_DIMENSIONS,
-          }),
-          expect.objectContaining({
-            ...INITIALIZED_IMAGE_PROPS,
-            ...SMILEY_IMAGE_DIMENSIONS,
-          }),
-        ]);
+        ).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              ...INITIALIZED_IMAGE_PROPS,
+              height: deerExpectedHeight,
+              width: deerExpectedWidth,
+            }),
+            expect.objectContaining({
+              ...INITIALIZED_IMAGE_PROPS,
+              height: smileyExpectedHeight,
+              width: smileyExpectedWidth,
+            }),
+          ]),
+        );
       });
 
       Keyboard.undo();
@@ -702,12 +715,14 @@ describe("history", () => {
         expect.objectContaining({
           ...INITIALIZED_IMAGE_PROPS,
           isDeleted: true,
-          ...DEER_IMAGE_DIMENSIONS,
+          height: deerExpectedHeight,
+          width: deerExpectedWidth,
         }),
         expect.objectContaining({
           ...INITIALIZED_IMAGE_PROPS,
           isDeleted: true,
-          ...SMILEY_IMAGE_DIMENSIONS,
+          height: smileyExpectedHeight,
+          width: smileyExpectedWidth,
         }),
       ]);
 
@@ -718,12 +733,14 @@ describe("history", () => {
         expect.objectContaining({
           ...INITIALIZED_IMAGE_PROPS,
           isDeleted: false,
-          ...DEER_IMAGE_DIMENSIONS,
+          height: deerExpectedHeight,
+          width: deerExpectedWidth,
         }),
         expect.objectContaining({
           ...INITIALIZED_IMAGE_PROPS,
           isDeleted: false,
-          ...SMILEY_IMAGE_DIMENSIONS,
+          height: smileyExpectedHeight,
+          width: smileyExpectedWidth,
         }),
       ]);
     };

@@ -11633,14 +11633,8 @@ class App extends React.Component<AppProps, AppState> {
     imageElement: ExcalidrawImageElement,
     imageHTML: HTMLImageElement,
   ) => {
-    const minHeight = Math.max(this.state.height - 120, 160);
-    // max 65% of canvas height, clamped to <300px, vh - 120px>
-    const maxHeight = Math.min(
-      minHeight,
-      Math.floor(this.state.height * 0.5) / this.state.zoom.value,
-    );
-
-    const height = Math.min(imageHTML.naturalHeight, maxHeight);
+    const targetHeight = 200;
+    const height = targetHeight;
     const width = height * (imageHTML.naturalWidth / imageHTML.naturalHeight);
 
     // add current imageElement width/height to account for previous centering

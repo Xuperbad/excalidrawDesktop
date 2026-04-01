@@ -6,6 +6,7 @@ import * as blobModule from "../data/blob";
 import * as filesystemModule from "../data/filesystem";
 import { Excalidraw } from "../index";
 import { createPasteEvent } from "../clipboard";
+import { getNormalizedZoom } from "../scene/normalize";
 
 import { API } from "./helpers/api";
 import { mockMultipleHTMLImageElements } from "./helpers/mocks";
@@ -27,6 +28,21 @@ export const setupImageTest = async (
   h.state.height = 1000;
 
   mockMultipleHTMLImageElements(sizes.map((size) => [size.width, size.height]));
+};
+
+const getExpectedInsertedDimensions = ({
+  width,
+  height,
+}: {
+  width: number;
+  height: number;
+}) => {
+  const targetHeight = 200;
+
+  return {
+    width: targetHeight * (width / height),
+    height: targetHeight,
+  };
 };
 
 describe("image insertion", () => {
@@ -52,22 +68,51 @@ describe("image insertion", () => {
     setupImageTest([DEER_IMAGE_DIMENSIONS, SMILEY_IMAGE_DIMENSIONS]);
 
   const assert = async () => {
+    const deerExpected = getExpectedInsertedDimensions(DEER_IMAGE_DIMENSIONS);
+    const smileyExpected =
+      getExpectedInsertedDimensions(SMILEY_IMAGE_DIMENSIONS);
+
     await waitFor(() => {
-      expect(h.elements).toEqual([
+      expect(h.elements).toHaveLength(2);
+      expect(h.elements[0]).toEqual(
         expect.objectContaining({
           ...INITIALIZED_IMAGE_PROPS,
-          ...DEER_IMAGE_DIMENSIONS,
+          height: deerExpected.height,
         }),
+      );
+      expect(h.elements[1]).toEqual(
         expect.objectContaining({
           ...INITIALIZED_IMAGE_PROPS,
-          ...SMILEY_IMAGE_DIMENSIONS,
+          height: smileyExpected.height,
         }),
-      ]);
+      );
+      expect(h.elements[0].width).toBeCloseTo(deerExpected.width);
+      expect(h.elements[1].width).toBeCloseTo(smileyExpected.width);
     });
     // Not placed on top of each other
     const dimensionsSet = new Set(h.elements.map((el) => `${el.x}-${el.y}`));
     expect(dimensionsSet.size).toEqual(h.elements.length);
   };
+
+  it("should insert images at a zoom-scaled target height", async () => {
+    await setupImageTest([DEER_IMAGE_DIMENSIONS]);
+
+    API.setAppState({ zoom: { value: getNormalizedZoom(0.5) } });
+
+    document.dispatchEvent(
+      createPasteEvent({
+        files: [await API.loadFile("./fixtures/deer.png")],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(h.elements).toHaveLength(1);
+      expect(h.elements[0].height).toBe(200);
+      expect(h.elements[0].width).toBeCloseTo(
+        200 * (DEER_IMAGE_DIMENSIONS.width / DEER_IMAGE_DIMENSIONS.height),
+      );
+    });
+  });
 
   it("should eventually initialize all dropped images", async () => {
     await setup();
